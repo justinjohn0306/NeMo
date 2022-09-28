@@ -17,6 +17,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from nemo.collections.asr.data.audio_to_text import AudioToCharWithDursF0Dataset
+from nemo.collections.tts.modules.fastspeech2_submodules import LengthRegulator
 
 
 class GaussianEmbedding(nn.Module):
@@ -34,48 +35,34 @@ class GaussianEmbedding(nn.Module):
         self.sigma_c = sigma_c
         self.merge_blanks = merge_blanks
 
+        # We keep everything above the same (even though we only use
+        # self.embed) so that existing code and models will still work.
+        self.length_regulator = LengthRegulator()
+
     def forward(self, text, durs):
-        """See base class."""
-        # Fake padding
-        text = F.pad(text, [0, 2, 0, 0], value=self.pad)
-        durs = F.pad(durs, [0, 2, 0, 0], value=0)
+        # Remove <blank> tokens. We keep the first <blank> so that the model
+        # knows if there's silence at the beginning of the clip.
+        text = torch.cat(
+            (
+                text[:, 0].unsqueeze(1),
+                text[:, 1::2],
+            ),
+            1
+        )
 
-        repeats = AudioToCharWithDursF0Dataset.repeat_merge(text, durs, self.pad)
-        total_time = repeats.shape[-1]
+        # Add the duration of each <blank> token to the preceeding token
+        # (again, except for the first <blank>).
+        durs = torch.cat(
+            (
+                durs[:, 0].unsqueeze(1),
+                durs[:, 1::2] + durs[:, 2::2],
+            ),
+            1
+        )
 
-        # Centroids: [B,T,N]
-        c = (durs / 2.0) + F.pad(torch.cumsum(durs, dim=-1)[:, :-1], [1, 0, 0, 0], value=0)
-        c = c.unsqueeze(1).repeat(1, total_time, 1)
-
-        # Sigmas: [B,T,N]
-        sigmas = durs
-        sigmas = sigmas.float() / self.sigma_c
-        sigmas = sigmas.unsqueeze(1).repeat(1, total_time, 1) + self.EPS
-        assert c.shape == sigmas.shape
-
-        # Times at indexes
-        t = torch.arange(total_time, device=c.device).view(1, -1, 1).repeat(durs.shape[0], 1, durs.shape[-1]).float()
-        t = t + 0.5
-
-        ns = slice(None)
-        if self.merge_blanks:
-            ns = slice(1, None, 2)
-
-        # Weights: [B,T,N]
-        d = torch.distributions.normal.Normal(c, sigmas)
-        w = d.log_prob(t).exp()[:, :, ns]  # [B,T,N]
-        pad_mask = (text == self.pad)[:, ns].unsqueeze(1).repeat(1, total_time, 1)
-        w.masked_fill_(pad_mask, 0.0)  # noqa
-        w = w / (w.sum(-1, keepdim=True) + self.EPS)
-        pad_mask = (repeats == self.pad).unsqueeze(-1).repeat(1, 1, text[:, ns].size(1))  # noqa
-        w.masked_fill_(pad_mask, 0.0)  # noqa
-        pad_mask[:, :, :-1] = False
-        w.masked_fill_(pad_mask, 1.0)  # noqa
-
-        # Embeds
-        u = torch.bmm(w, self.embed(text)[:, ns, :])  # [B,T,E]
-
-        return u
+        # Embed and repeat tokens
+        embed = self.embed(text)
+        return self.length_regulator(embed, durs)
 
 
 class MaskedInstanceNorm1d(nn.Module):
