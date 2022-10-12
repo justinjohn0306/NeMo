@@ -30,14 +30,33 @@ class GaussianEmbedding(nn.Module):
     ):
         super().__init__()
 
+        # Keep this the same so that existing models still work.
         self.embed = nn.Embedding(len(vocab.labels), d_emb)
         self.pad = vocab.pad
         self.sigma_c = sigma_c
         self.merge_blanks = merge_blanks
 
-        # We keep everything above the same (even though we only use
-        # self.embed) so that existing code and models will still work.
         self.length_regulator = LengthRegulator()
+
+        # The idea is to smooth the upsampled embeddings with a Gaussian kernel
+        # to approximate the behavior of the regular GaussianEmbedding.
+        # The stddev is 0.5 since that's what the regular GaussianEmbedding
+        # uses for a token with a duration of 1 (as 1/sigma_c = 0.5), and
+        # non-blank tokens usually have a duration of 1.
+        # The kernel size is 5 since going larger would have almost no effect.
+        # (e.g. expanding to a size of 7 means that the value on the edge of
+        # the kernel would be 1.2e-8, which is probably too small to make a
+        # difference)
+        normal = torch.distributions.normal.Normal(0, 0.5)
+        x = torch.linspace(-2, 2, 5)
+        kernel = normal.log_prob(x).exp()
+        # Normalize so the overall embeddings aren't scaled up or down by a
+        # constant.
+        kernel = kernel / kernel.sum()
+        kernel = kernel.reshape(1, 1, 5)
+        # persistent=False ensures that the buffer isn't added to state_dict.
+        # This allows for loading of checkpoints made without this code change.
+        self.register_buffer("gaussian_kernel", kernel, persistent=False)
 
     def forward(self, text, durs):
         # Remove <blank> tokens. We keep the first <blank> so that the model
@@ -61,8 +80,19 @@ class GaussianEmbedding(nn.Module):
         )
 
         # Embed and repeat tokens
-        embed = self.embed(text)
-        return self.length_regulator(embed, durs)
+        x = self.length_regulator(self.embed(text), durs)
+
+        # Smooth every channel with the Gaussian kernel
+        b, c, t = x.shape
+        x = x.view(b * c, 1, t)
+        x = F.conv1d(
+            # Reflect padding ensures that the edges don't change
+            F.pad(x, [2, 2], mode="reflect"),
+            self.gaussian_kernel,
+        )
+        x = x.view(b, c, t)
+
+        return x
 
 
 class MaskedInstanceNorm1d(nn.Module):
