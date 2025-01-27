@@ -47,7 +47,7 @@ class Preprocessor:
 
 @dataclass
 class Tacotron2Config:
-    preprocessor: Preprocessor = Preprocessor()
+    preprocessor: Preprocessor = field(default_factory=lambda: Preprocessor())
     encoder: Dict[Any, Any] = MISSING
     decoder: Dict[Any, Any] = MISSING
     postnet: Dict[Any, Any] = MISSING
