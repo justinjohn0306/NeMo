@@ -27,6 +27,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from dataclasses import field
 from typing import List, Optional, Union
 
 import torch
@@ -721,11 +722,11 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer):
 
 @dataclass
 class GreedyRNNTInferConfig:
-    max_symbols_per_step: Optional[int] = None
-    preserve_alignments: bool = False
+    max_symbols_per_step: Optional[int] = field(default_factory=lambda: None)
+    preserve_alignments: bool = field(default_factory=lambda: False)
 
 
 @dataclass
 class GreedyBatchedRNNTInferConfig:
-    max_symbols_per_step: Optional[int] = None
-    preserve_alignments: bool = False
+    max_symbols_per_step: Optional[int] = field(default_factory=lambda: None)
+    preserve_alignments: bool = field(default_factory=lambda: False)
